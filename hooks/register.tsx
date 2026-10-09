@@ -1,10 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, Register } from 'claude-code'
+import type { CommandPresentation, EngineInterface as Engine, Register, RenderSurface } from 'claude-code'
 
 import type { TrackedPr } from '../types'
 
 const PANE = 'pr-tracker'
 const POLL_MS = 60_000
+/** The terminal width from which the fullscreen layout docks a pane beside the transcript. */
+const DOCK_COLUMNS = 110
 const FIELDS = 'number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup'
 
 const prs = atom({ plugin: 'pr-tracker', key: 'prs' } as const, [] as TrackedPr[])
@@ -64,6 +66,8 @@ export function summarise(rollup: readonly Check[]) {
 
 let cwdRepo: string | undefined
 let refreshing = false
+/** Whether a clickable summary under the prompt stands in for the status line. */
+let summaryInHint = false
 
 async function gh($: Engine, argv: string[]) {
   return $.process.run(['gh', ...argv], { timeoutMs: 30_000 })
@@ -138,16 +142,25 @@ async function refresh($: Engine, keys?: string[]) {
   }
 }
 
-async function showStatus($: Engine) {
-  const list = await read($, prs)
+/** `PRs 3 open · 1 failing · 2 running`, or undefined with nothing tracked. */
+function summary(list: readonly TrackedPr[]): string | undefined {
+  if (list.length === 0) return undefined
   const open = list.filter(p => p.state === 'OPEN')
-  if (list.length === 0) return $.ui.status(undefined)
   const failing = open.filter(p => p.fail > 0).length
   const running = open.filter(p => p.pending > 0).length
   const parts = [`PRs ${open.length} open`]
   if (failing) parts.push(`${failing} failing`)
   if (running) parts.push(`${running} running`)
-  return $.ui.status(parts.join(' · '))
+  return parts.join(' · ')
+}
+
+async function showStatus($: Engine) {
+  return $.ui.status(summaryInHint ? undefined : summary(await read($, prs)))
+}
+
+async function untrack($: Engine, drop: (p: TrackedPr) => boolean) {
+  await update($, prs, list => list.filter(p => !drop(p)))
+  await showStatus($)
 }
 
 type Health = 'failing' | 'conflict' | 'running' | 'green' | 'draft' | 'quiet' | 'merged' | 'closed'
@@ -249,6 +262,29 @@ function ago(now: number, at: number) {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`
 }
 
+/**
+ * Whether some surface would dock the pane on the right: the terminal in its fullscreen layout from
+ * DOCK_COLUMNS wide, or an attached desktop or IDE. `at` describes the terminal alone.
+ */
+export function docks(at: CommandPresentation | undefined, surfaces: readonly RenderSurface[]): boolean {
+  if (at?.isFullscreen === true && at.columns >= DOCK_COLUMNS) return true
+  return surfaces.some(s => s === 'desktop' || s === 'vscode')
+}
+
+/** The pane is only ever a right-hand dock; where nothing would dock it, it stays shut. */
+async function openPane($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
+  if (!docks(at, await $.session.surfaces())) {
+    const now = at?.isFullscreen ? `${at.columns} columns` : 'main screen'
+    return `The PR pane docks on the right only: it needs the fullscreen layout and ${DOCK_COLUMNS} columns (now ${now}). The status line still tracks.`
+  }
+  await $.ui.open({ id: PANE, title: 'Pull requests' })
+  return undefined
+}
+
+async function isPaneOpen($: Engine) {
+  return (await $.ui.panes()).some(p => p.id === PANE)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -267,26 +303,23 @@ export const register: Register = on => {
       const ref = refFromArg(arg)
       if (!ref) return { text: `Not a PR: ${arg}` }
       await track($, [ref])
-      await $.ui.open({ id: PANE, title: 'Pull requests' })
-      return { text: `Tracking ${arg}.` }
+      const refused = await openPane($, e.presentation)
+      return { text: refused ? `Tracking ${arg}. ${refused}` : `Tracking ${arg}.` }
     }
     if (verb === 'remove') {
       const ref = refFromArg(arg)
-      await update($, prs, list =>
-        list.filter(p => !(ref && p.number === ref.number && (!ref.repo || p.repo === ref.repo))),
-      )
-      await showStatus($)
+      await untrack($, p => Boolean(ref && p.number === ref.number && (!ref.repo || p.repo === ref.repo)))
       return { text: `Stopped tracking ${arg}.` }
     }
     if (verb === 'clear') {
-      await update($, prs, () => [])
-      await showStatus($)
+      await untrack($, () => true)
       return { text: 'Cleared the tracked PRs.' }
     }
     if (verb === 'refresh' || verb === '') {
       void refresh($)
-      await $.ui.open({ id: PANE, title: 'Pull requests' })
-      return { text: verb ? 'Refreshing the tracked PRs.' : 'PR tracker opened.' }
+      const refused = await openPane($, e.presentation)
+      if (verb) return { text: refused ? `Refreshing the tracked PRs. ${refused}` : 'Refreshing the tracked PRs.' }
+      return { text: refused ?? 'PR tracker opened.' }
     }
     return { text: `Unknown: /prs ${verb}. Use add, remove, clear or refresh.` }
   })
@@ -297,28 +330,76 @@ export const register: Register = on => {
     const refs = refsInCommand(command)
     if (PR_CREATE.test(command) && ran.deny === undefined && ran.isError !== true) {
       // The new PR is the current branch's; gh resolves it from where the session runs.
-      void gh($, ['pr', 'view', '--json', 'number,url']).then(r => {
-        if (r.exitCode !== 0) return
-        const j = JSON.parse(r.stdout)
-        const url = [...String(j.url).matchAll(PR_URL)][0]
-        return track($, [{ repo: url?.[1], number: Number(j.number) }])
-      })
+      void gh($, ['pr', 'view', '--json', 'number,url'])
+        .then(r => {
+          if (r.exitCode !== 0) return
+          const j = JSON.parse(r.stdout)
+          const url = [...String(j.url).matchAll(PR_URL)][0]
+          return track($, [{ repo: url?.[1], number: Number(j.number) }])
+        })
+        .catch(() => undefined)
     }
     if (refs.length > 0) void track($, refs)
     return ran
   }).catch(($, e, next) => next(e))
 
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const line = await next(e)
+    const clickable = e.surface !== 'terminal' || e.viewport?.isFullscreen === true
+    const text = summary(await read($, prs))
+    if (e.surface === 'terminal' && clickable !== summaryInHint) {
+      summaryInHint = clickable
+      void showStatus($)
+    }
+    if (!clickable || !text) return line
+    const { Box, Button } = $.ui.resolve(e)
+    const columns = e.viewport?.columns
+    const toggle = async () => {
+      if (await isPaneOpen($)) return $.ui.close({ id: PANE })
+      if (e.surface === 'terminal' && columns !== undefined && columns < DOCK_COLUMNS) {
+        return $.ui.toast(`The PR pane docks from ${DOCK_COLUMNS} columns; the terminal is ${columns}.`)
+      }
+      await $.ui.open({ id: PANE, title: 'Pull requests', focus: true })
+    }
+    return (
+      <Box justifyContent="space-between">
+        {line}
+        <Button key="prs-toggle" plain dimColor onPress={() => void toggle()}>⌥ {text}</Button>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Link } = $.ui.resolve(e)
+    const { Box, Text, Link, Button } = $.ui.resolve(e)
+    // The terminal reseats a docked pane inline when it narrows below DOCK_COLUMNS. Placement is
+    // per surface, so a phone seating its copy inline must not close the terminal's dock.
+    if (e.props.placement === 'inline') {
+      if (e.surface === 'terminal') void $.ui.close({ id: PANE }).catch(() => undefined)
+      return <Text color="inactive">The PR pane docks on the right only.</Text>
+    }
     const list = await read($, prs)
     const now = await $.clock.now()
-    const inner = Math.max(30, (e.viewport?.columns ?? 80) - 6)
+    const inner = Math.max(20, (e.props.bodyColumns ?? 80) - 4)
     const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(1, n - 1))}…` : s)
+
+    const controls = (
+      <Box>
+        <Button key="refresh" plain dimColor hotkey="r" onPress={() => void refresh($)}>refresh</Button>
+        <Text>  </Text>
+        <Button key="close" plain dimColor hotkey="x" role="dismiss" onPress={() => void $.ui.close({ id: PANE })}>close</Button>
+      </Box>
+    )
+    const untrackButton = (p: TrackedPr) => (
+      <Button key={`untrack:${p.key}`} plain dimColor onPress={() => void untrack($, q => q.key === p.key)}>✕</Button>
+    )
 
     if (list.length === 0) {
       return (
         <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1}>
-          <Text bold color="claude">⌥ Pull requests</Text>
+          <Box justifyContent="space-between">
+            <Text bold color="claude">⌥ Pull requests</Text>
+            {controls}
+          </Box>
           <Text color="inactive">Nothing tracked yet.</Text>
           <Text color="inactive">Any gh pr create · view · checks · merge adds one, or /prs add 123.</Text>
         </Box>
@@ -332,6 +413,11 @@ export const register: Register = on => {
     const layout = plan(live, settled, room)
     const count = (want: Health) => list.filter(p => health(p) === want).length
     const newest = Math.max(...list.map(p => p.checkedAt))
+    const clearDone = (
+      <Button key="clear-done" plain dimColor onPress={() => void untrack($, p => p.state === 'MERGED' || p.state === 'CLOSED')}>
+        clear
+      </Button>
+    )
     const tally: [string, string, number][] = [
       ['✗ failing', 'error', count('failing') + count('conflict')],
       ['◐ running', 'warning', count('running')],
@@ -351,9 +437,12 @@ export const register: Register = on => {
                 <Text color={color}>  {n} {label.split(' ')[0]} <Text color="inactive">{label.split(' ')[1]}</Text></Text>
               ))}
           </Text>
-          <Text color="inactive">
-            {layout.height > room ? (e.props.isFocused ? '↑↓ scroll  ' : 'ctrl+x tab ↕  ') : ''}↻ {ago(now, newest)}
-          </Text>
+          <Box>
+            <Text color="inactive">
+              {layout.height > room ? (e.props.isFocused ? '↑↓ scroll  ' : 'ctrl+x tab ↕  ') : ''}↻ {ago(now, newest)}  
+            </Text>
+            {controls}
+          </Box>
         </Box>
 
         {live.map(p => {
@@ -362,15 +451,16 @@ export const register: Register = on => {
           const done = p.pass + p.fail + p.skipped
           if (!layout.full.has(p.key)) {
             return (
-              <Box paddingX={1}>
+              <Box paddingX={1} justifyContent="space-between">
                 <Text>
                   <Text color={ACCENT[kind]} bold>{GLYPH[kind]} </Text>
                   <Link href={p.url}><Text bold color="suggestion">#{p.number}</Text></Link>
-                  <Text> {cut(p.title || p.repo, Math.max(8, inner - String(p.number).length - 22))}</Text>
+                  <Text> {cut(p.title || p.repo, Math.max(8, inner - String(p.number).length - 25))}</Text>
                   {ci > 0 ? <Text>  </Text> : null}
                   {ciBar(p, 8).map(seg => <Text color={seg.color}>{seg.text}</Text>)}
                   {ci > 0 ? <Text color="inactive"> {done}/{ci}</Text> : null}
                 </Text>
+                {untrackButton(p)}
               </Box>
             )
           }
@@ -408,27 +498,43 @@ export const register: Register = on => {
                 <Text color="warning">  ◐ {cut(p.running.slice(0, 3).join(' · '), inner - 4)}{p.running.length > 3 ? ` +${p.running.length - 3}` : ''}</Text>
               ) : null}
               {p.error ? <Text color="error">  ⚠ {cut(p.error, inner - 4)}</Text> : null}
-              <Text color="inactive">  {p.repo} · checked {ago(now, p.checkedAt)} ago</Text>
+              <Box justifyContent="space-between">
+                <Text color="inactive">  {cut(`${p.repo} · checked ${ago(now, p.checkedAt)} ago`, inner - 16)}</Text>
+                <Box>
+                  <Link href={`${p.url}/checks`}><Text color="suggestion">checks</Text></Link>
+                  <Text> </Text>
+                  <Button key={`refresh:${p.key}`} plain dimColor onPress={() => void refresh($, [p.key])}>↻</Button>
+                  <Text> </Text>
+                  {untrackButton(p)}
+                </Box>
+              </Box>
             </Box>
           )
         })}
         {layout.doneLines === 'list' ? (
           <Box flexDirection="column" paddingX={1} marginTop={1}>
-            <Text color="inactive">── done ──</Text>
+            <Box justifyContent="space-between">
+              <Text color="inactive">── done ──</Text>
+              {clearDone}
+            </Box>
             {settled.map(p => (
-              <Text>
-                <Text color={ACCENT[health(p)]}>{GLYPH[health(p)]} </Text>
-                <Link href={p.url}><Text color="inactive">#{p.number}</Text></Link>
-                <Text color="inactive" strikethrough={p.state === 'CLOSED'}> {cut(p.title, inner - 10)}</Text>
-              </Text>
+              <Box justifyContent="space-between">
+                <Text>
+                  <Text color={ACCENT[health(p)]}>{GLYPH[health(p)]} </Text>
+                  <Link href={p.url}><Text color="inactive">#{p.number}</Text></Link>
+                  <Text color="inactive" strikethrough={p.state === 'CLOSED'}> {cut(p.title, inner - 13)}</Text>
+                </Text>
+                {untrackButton(p)}
+              </Box>
             ))}
           </Box>
         ) : null}
         {layout.doneLines === 'summary' ? (
-          <Box paddingX={1} marginTop={1}>
+          <Box paddingX={1} marginTop={1} justifyContent="space-between">
             <Text color="inactive">
-              {cut(`── done: ${settled.map(p => `${GLYPH[health(p)]}#${p.number}`).join(' ')}`, inner)}
+              {cut(`── done: ${settled.map(p => `${GLYPH[health(p)]}#${p.number}`).join(' ')}`, inner - 7)}
             </Text>
+            {clearDone}
           </Box>
         ) : null}
       </Box>

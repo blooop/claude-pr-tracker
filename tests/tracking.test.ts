@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { cardRows, MIN_CARDS, plan, refsInCommand, summarise } from '../hooks/register.tsx'
+import { cardRows, docks, MIN_CARDS, plan, refsInCommand, summarise } from '../hooks/register.tsx'
 import type { TrackedPr } from '../types'
 
 const ROLLUP = {
@@ -29,6 +29,22 @@ async function trackOne($: Engine, on: On, statuses: (string | undefined)[] = []
   })
   await $.tool.call({ tool: 'Bash', command: 'gh pr checks 12371' })
   await clock.settle()
+}
+
+// The engine's pane bookkeeping, answered from a set of open ids.
+function panes(on: On, surfaces: string[] = ['terminal']) {
+  const open = new Set<string>()
+  on('session.surfaces', () => ({ value: surfaces as never }))
+  on('ui.open', ($, e) => {
+    open.add(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    open.delete(e.id)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [...open].map(id => ({ id, title: id })) as never }))
+  return open
 }
 
 test('a gh pr command run through Bash is tracked and its CI tally reaches the status line', async ($, on) => {
@@ -127,4 +143,77 @@ test('a short pane keeps every PR, the first two as cards, and says it scrolls',
   const tall = await mount(80)
   expect(await cards(tall)).toBe(6)
   expect(await tall.find({ text: /ctrl\+x tab/ })).toBeUndefined()
+})
+
+test('/prs opens nothing where the pane would sit inline above the prompt', async ($, on) => {
+  const clock = mock.clock(on)
+  const open = panes(on, ['terminal', 'mobile'])
+  const r = await $.command.run({ command: 'prs', args: '' })
+  await clock.settle()
+  expect([...open]).toEqual([])
+  expect(JSON.stringify(r)).toContain('110 columns')
+})
+
+test('a pane seated inline on the terminal closes itself; one seated inline on a phone does not', async ($, on) => {
+  const open = panes(on)
+  await trackOne($, on)
+  for (const surface of ['mobile', 'terminal'] as const) {
+    open.add('pr-tracker')
+    const ui = await $.ui.mount({
+      plugin: 'pr-tracker', surface, component: 'Pane', requestId: 'pr-tracker',
+      props: { title: 'Pull requests', isFocused: false, placement: 'inline', bodyColumns: 60 } as never,
+    })
+    expect(await ui.find({ text: /#12371/ })).toBeUndefined()
+    expect(open.has('pr-tracker')).toBe(surface === 'mobile')
+    await ui.unmount()
+  }
+})
+
+test('the pane docks on a wide fullscreen terminal or an attached desktop, nowhere else', () => {
+  const cases: [boolean, number, ('terminal' | 'desktop' | 'mobile' | 'vscode')[], boolean][] = [
+    [true, 110, ['terminal'], true],
+    [true, 109, ['terminal'], false],
+    [false, 200, ['terminal'], false],
+    [false, 80, ['terminal', 'mobile'], false],
+    [false, 80, ['terminal', 'desktop'], true],
+    [false, 80, ['vscode'], true],
+  ]
+  for (const [isFullscreen, columns, surfaces, want] of cases) {
+    expect(docks({ isFullscreen, columns }, surfaces)).toBe(want)
+  }
+})
+
+test('clicking the PR summary under the prompt opens the pane and clicking it again closes it', async ($, on) => {
+  const open = panes(on)
+  on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: ['? for shortcuts'] }) as never)
+  const statuses: (string | undefined)[] = []
+  await trackOne($, on, statuses)
+  const ui = await $.ui.mount({
+    plugin: 'pr-tracker', surface: 'terminal', component: 'PromptHint',
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+    viewport: { columns: 140, rows: 40, isFullscreen: true },
+  })
+  expect((await ui.find({ key: 'prs-toggle' }))?.text).toContain('1 open')
+  expect((await ui.find({ text: /for shortcuts/ }))?.text).toBeDefined()
+  expect(statuses.at(-1)).toBeUndefined()
+  await ui.press({ key: 'prs-toggle' })
+  expect(open.has('pr-tracker')).toBe(true)
+  await ui.press({ key: 'prs-toggle' })
+  expect(open.has('pr-tracker')).toBe(false)
+})
+
+test('the pane untracks a PR and closes itself from its own buttons', async ($, on) => {
+  const statuses: (string | undefined)[] = []
+  const open = panes(on)
+  await trackOne($, on, statuses)
+  open.add('pr-tracker')
+  const ui = await $.ui.mount({
+    plugin: 'pr-tracker', surface: 'terminal', component: 'Pane', requestId: 'pr-tracker',
+    props: { title: 'Pull requests', isFocused: false, placement: 'dock', bodyColumns: 60 } as never,
+  })
+  await ui.press({ key: 'untrack:kinisi-robotics/kinisi_ros#12371' })
+  expect(await ui.find({ text: /#12371/ })).toBeUndefined()
+  expect(statuses.at(-1)).toBeUndefined()
+  await ui.press({ key: 'close' })
+  expect(open.has('pr-tracker')).toBe(false)
 })
