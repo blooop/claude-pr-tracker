@@ -97,7 +97,7 @@ function pr(number: number, over: Partial<TrackedPr> = {}): TrackedPr {
 test('the layout fits a tall pane and keeps every PR, scrolling, in a short one', () => {
   const live = [1, 2, 3, 4, 5, 6].map(n => pr(n, n === 4 ? { fail: 1, failing: ['lint'] } : {}))
   const settled = [pr(7, { state: 'MERGED' }), pr(8, { state: 'MERGED' })]
-  const all = live.reduce((n, p) => n + cardRows(p), 2) + 2 + settled.length
+  const all = live.reduce((n, p) => n + cardRows(p), 3) + 2 + settled.length
   expect(plan(live, settled, all).full.size).toBe(6)
   expect(plan(live, settled, all).height).toBeLessThanOrEqual(all)
   for (const rows of [4, 8, 12, 20]) {
@@ -105,7 +105,7 @@ test('the layout fits a tall pane and keeps every PR, scrolling, in a short one'
     expect(l.full.size).toBeGreaterThanOrEqual(MIN_CARDS)
     expect([...l.full].slice(0, MIN_CARDS)).toEqual(['o/r#1', 'o/r#2'])
     expect(l.height).toBe(
-      2 + live.reduce((n, p) => n + (l.full.has(p.key) ? cardRows(p) : 1), 0) +
+      3 + live.reduce((n, p) => n + (l.full.has(p.key) ? cardRows(p) : 1), 0) +
         (l.doneLines === 'list' ? 2 + settled.length : 2),
     )
   }
@@ -169,13 +169,16 @@ test('a pane seated inline on the terminal closes itself; one seated inline on a
   }
 })
 
-test('the pane docks on a wide fullscreen terminal or an attached desktop, nowhere else', () => {
+test('an attached terminal decides where the pane docks; without one, a desktop or IDE docks it', () => {
   const cases: [boolean, number, ('terminal' | 'desktop' | 'mobile' | 'vscode')[], boolean][] = [
     [true, 110, ['terminal'], true],
     [true, 109, ['terminal'], false],
     [false, 200, ['terminal'], false],
     [false, 80, ['terminal', 'mobile'], false],
-    [false, 80, ['terminal', 'desktop'], true],
+    [false, 80, ['terminal', 'desktop'], false],
+    [true, 140, ['terminal', 'desktop'], true],
+    [false, 80, ['desktop'], true],
+    [false, 80, ['mobile'], false],
     [false, 80, ['vscode'], true],
   ]
   for (const [isFullscreen, columns, surfaces, want] of cases) {

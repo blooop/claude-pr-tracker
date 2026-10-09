@@ -68,6 +68,8 @@ let cwdRepo: string | undefined
 let refreshing = false
 /** Whether a clickable summary under the prompt stands in for the status line. */
 let summaryInHint = false
+/** The terminal's layout as last seen, for presses that come with no `presentation`. */
+let terminalLayout: CommandPresentation | undefined
 
 async function gh($: Engine, argv: string[]) {
   return $.process.run(['gh', ...argv], { timeoutMs: 30_000 })
@@ -142,15 +144,15 @@ async function refresh($: Engine, keys?: string[]) {
   }
 }
 
-/** `PRs 3 open · 1 failing · 2 running`, or undefined with nothing tracked. */
-function summary(list: readonly TrackedPr[]): string | undefined {
+/** `PRs 3 open · 1 failing · 2 running` (`short`: `PRs 3 · 1✗ · 2◐`), or undefined with nothing tracked. */
+function summary(list: readonly TrackedPr[], short = false): string | undefined {
   if (list.length === 0) return undefined
   const open = list.filter(p => p.state === 'OPEN')
   const failing = open.filter(p => p.fail > 0).length
   const running = open.filter(p => p.pending > 0).length
-  const parts = [`PRs ${open.length} open`]
-  if (failing) parts.push(`${failing} failing`)
-  if (running) parts.push(`${running} running`)
+  const parts = [short ? `PRs ${open.length}` : `PRs ${open.length} open`]
+  if (failing) parts.push(short ? `${failing}✗` : `${failing} failing`)
+  if (running) parts.push(short ? `${running}◐` : `${running} running`)
   return parts.join(' · ')
 }
 
@@ -236,7 +238,7 @@ export const MIN_CARDS = 2
  * taller than the pane is left to the pane's own scrolling.
  */
 export function plan(live: TrackedPr[], settled: TrackedPr[], rows: number): Layout {
-  const HEADER = 2
+  const HEADER = 3
   let budget = rows - HEADER - live.length
   let doneLines: Layout['doneLines'] = 'none'
   if (settled.length > 0) {
@@ -263,22 +265,32 @@ function ago(now: number, at: number) {
 }
 
 /**
- * Whether some surface would dock the pane on the right: the terminal in its fullscreen layout from
- * DOCK_COLUMNS wide, or an attached desktop or IDE. `at` describes the terminal alone.
+ * Whether the pane would dock on the right. Panes are session-wide and an inline terminal seat
+ * closes the pane, so an attached terminal decides (its fullscreen layout from DOCK_COLUMNS wide);
+ * without one, an attached desktop or IDE docks it. `at` describes the terminal alone.
  */
 export function docks(at: CommandPresentation | undefined, surfaces: readonly RenderSurface[]): boolean {
-  if (at?.isFullscreen === true && at.columns >= DOCK_COLUMNS) return true
+  if (surfaces.includes('terminal')) return at?.isFullscreen === true && at.columns >= DOCK_COLUMNS
   return surfaces.some(s => s === 'desktop' || s === 'vscode')
+}
+
+/** Why the pane will not open, or undefined when it docks. */
+async function dockRefusal($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
+  if (docks(at, await $.session.surfaces())) return undefined
+  const now = at?.isFullscreen ? `${at.columns} columns` : 'main screen'
+  return `The PR pane docks on the right only: it needs the fullscreen layout and ${DOCK_COLUMNS} columns (now ${now}). The status line still tracks.`
 }
 
 /** The pane is only ever a right-hand dock; where nothing would dock it, it stays shut. */
 async function openPane($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
-  if (!docks(at, await $.session.surfaces())) {
-    const now = at?.isFullscreen ? `${at.columns} columns` : 'main screen'
-    return `The PR pane docks on the right only: it needs the fullscreen layout and ${DOCK_COLUMNS} columns (now ${now}). The status line still tracks.`
-  }
-  await $.ui.open({ id: PANE, title: 'Pull requests' })
-  return undefined
+  terminalLayout = at ?? terminalLayout
+  const refused = await dockRefusal($, terminalLayout)
+  if (!refused) await $.ui.open({ id: PANE, title: 'Pull requests' })
+  return refused
+}
+
+function closePane($: Engine) {
+  return $.ui.close({ id: PANE }).catch(() => undefined)
 }
 
 async function isPaneOpen($: Engine) {
@@ -346,25 +358,28 @@ export const register: Register = on => {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const line = await next(e)
     const clickable = e.surface !== 'terminal' || e.viewport?.isFullscreen === true
-    const text = summary(await read($, prs))
+    if (e.surface === 'terminal' && e.viewport?.isFullscreen !== undefined) {
+      terminalLayout = { isFullscreen: e.viewport.isFullscreen, columns: e.viewport.columns }
+    }
+    const text = summary(await read($, prs), (e.viewport?.columns ?? 0) < 120)
     if (e.surface === 'terminal' && clickable !== summaryInHint) {
       summaryInHint = clickable
       void showStatus($)
     }
     if (!clickable || !text) return line
     const { Box, Button } = $.ui.resolve(e)
-    const columns = e.viewport?.columns
     const toggle = async () => {
-      if (await isPaneOpen($)) return $.ui.close({ id: PANE })
-      if (e.surface === 'terminal' && columns !== undefined && columns < DOCK_COLUMNS) {
-        return $.ui.toast(`The PR pane docks from ${DOCK_COLUMNS} columns; the terminal is ${columns}.`)
-      }
+      if (await isPaneOpen($)) return closePane($)
+      const refused = await dockRefusal($, terminalLayout)
+      if (refused) return $.ui.toast(refused)
       await $.ui.open({ id: PANE, title: 'Pull requests', focus: true })
     }
     return (
       <Box justifyContent="space-between">
-        {line}
-        <Button key="prs-toggle" plain dimColor onPress={() => void toggle()}>⌥ {text}</Button>
+        <Box flexShrink={1}>{line}</Box>
+        <Box flexShrink={0} marginLeft={1}>
+          <Button key="prs-toggle" plain dimColor onPress={() => void toggle().catch(() => undefined)}>⌥ {text}</Button>
+        </Box>
       </Box>
     )
   })
@@ -374,7 +389,7 @@ export const register: Register = on => {
     // The terminal reseats a docked pane inline when it narrows below DOCK_COLUMNS. Placement is
     // per surface, so a phone seating its copy inline must not close the terminal's dock.
     if (e.props.placement === 'inline') {
-      if (e.surface === 'terminal') void $.ui.close({ id: PANE }).catch(() => undefined)
+      if (e.surface === 'terminal') void closePane($)
       return <Text color="inactive">The PR pane docks on the right only.</Text>
     }
     const list = await read($, prs)
@@ -386,7 +401,7 @@ export const register: Register = on => {
       <Box>
         <Button key="refresh" plain dimColor hotkey="r" onPress={() => void refresh($)}>refresh</Button>
         <Text>  </Text>
-        <Button key="close" plain dimColor hotkey="x" role="dismiss" onPress={() => void $.ui.close({ id: PANE })}>close</Button>
+        <Button key="close" plain dimColor hotkey="x" role="dismiss" onPress={() => void closePane($)}>close</Button>
       </Box>
     )
     const untrackButton = (p: TrackedPr) => (
@@ -428,21 +443,21 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
+        <Box justifyContent="space-between" paddingX={1}>
+          <Text bold color="claude">⌥ Pull requests</Text>
+          {controls}
+        </Box>
         <Box justifyContent="space-between" paddingX={1} marginBottom={1}>
           <Text>
-            <Text bold color="claude">⌥ Pull requests </Text>
             {tally
               .filter(([, , n]) => n > 0)
-              .map(([label, color, n]) => (
-                <Text color={color}>  {n} {label.split(' ')[0]} <Text color="inactive">{label.split(' ')[1]}</Text></Text>
+              .map(([label, color, n], i) => (
+                <Text color={color}>{i ? '  ' : ''}{n} {label.split(' ')[0]} <Text color="inactive">{label.split(' ')[1]}</Text></Text>
               ))}
           </Text>
-          <Box>
-            <Text color="inactive">
-              {layout.height > room ? (e.props.isFocused ? '↑↓ scroll  ' : 'ctrl+x tab ↕  ') : ''}↻ {ago(now, newest)}  
-            </Text>
-            {controls}
-          </Box>
+          <Text color="inactive">
+            {layout.height > room ? (e.props.isFocused ? '↑↓ scroll  ' : 'ctrl+x tab ↕  ') : ''}↻ {ago(now, newest)}
+          </Text>
         </Box>
 
         {live.map(p => {
