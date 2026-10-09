@@ -16,7 +16,7 @@ Needs the [GitHub CLI](https://cli.github.com/) installed and logged in (`gh aut
 
 ## Use
 
-- The pane opens on its own once per session, the first time it can dock; once closed it stays shut. `/prs` opens it again, docked on the right of the transcript. It docks in the terminal's fullscreen layout at 110 columns or wider (or in the desktop app when no terminal is attached); anywhere else it stays shut, closes if the terminal narrows below that, and the status line carries on tracking.
+- The pane opens on its own once per session, the first time it can open; once closed it stays shut. `/prs` opens it again. Under the classic renderer (`"tui": "default"`) it sits inline above the prompt, at most 8 rows; in the fullscreen layout it docks on the right of the transcript. It docks in the terminal's fullscreen layout at 110 columns or wider (or in the desktop app when no terminal is attached); anywhere else it stays shut, closes if the terminal narrows below that, and the status line carries on tracking.
 - In fullscreen the summary sits clickable at the end of the hint line under the prompt (`⌥ PRs 3 open · 1 failing`): click it to open the pane, click again to close it.
 - In the pane, click a PR number to open it on GitHub, `checks` for its checks page, `↻` to refetch it and `✕` to stop tracking it; the header has `refresh` (`r`) and `close` (`x`), and the done list `clear`.
 - Docked narrower than 48 columns, the pane shows one line per PR (status, number, CI tally, `✕`) under a single `⌥ PRs ✕` row.

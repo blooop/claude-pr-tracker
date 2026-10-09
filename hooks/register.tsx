@@ -7,6 +7,8 @@ const PANE = 'pr-tracker'
 const POLL_MS = 60_000
 /** The terminal width from which the fullscreen layout docks a pane beside the transcript. */
 const DOCK_COLUMNS = 110
+/** The most rows the pane takes above the prompt under the classic renderer. */
+const INLINE_ROWS = 8
 /** Below this many body columns the pane drops its cards and header for one line per PR. */
 const MINIMAL_COLUMNS = 48
 const FIELDS = 'number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup'
@@ -278,14 +280,23 @@ export function docks(at: CommandPresentation | undefined, surfaces: readonly Re
   return surfaces.some(s => s === 'desktop' || s === 'vscode')
 }
 
-/** Why the pane will not open, or undefined when it docks. */
-async function dockRefusal($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
-  if (docks(at, await $.session.surfaces())) return undefined
-  const now = at?.isFullscreen ? `${at.columns} columns` : 'main screen'
-  return `The PR pane docks on the right only: it needs the fullscreen layout and ${DOCK_COLUMNS} columns (now ${now}). The status line still tracks.`
+/**
+ * Whether the pane opens: docked on the right, or inline above the prompt when the terminal uses
+ * the classic renderer (main screen), where nothing can dock. A fullscreen terminal too narrow to
+ * dock it still keeps it shut.
+ */
+export function opens(at: CommandPresentation | undefined, surfaces: readonly RenderSurface[]): boolean {
+  return docks(at, surfaces) || (surfaces.includes('terminal') && at?.isFullscreen === false)
 }
 
-/** The pane is only ever a right-hand dock; where nothing would dock it, it stays shut. */
+/** Why the pane will not open, or undefined when it opens. */
+async function dockRefusal($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
+  if (opens(at, await $.session.surfaces())) return undefined
+  const now = at?.isFullscreen ? `${at.columns} columns` : 'layout unknown'
+  return `The PR pane needs ${DOCK_COLUMNS} columns in the fullscreen layout, or the classic renderer (now ${now}). The status line still tracks.`
+}
+
+/** The pane docks on the right, or sits inline under the classic renderer; anywhere else it stays shut. */
 async function openPane($: Engine, at: CommandPresentation | undefined): Promise<string | undefined> {
   terminalLayout = at ?? terminalLayout
   const refused = await dockRefusal($, terminalLayout)
@@ -399,9 +410,12 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link, Button } = $.ui.resolve(e)
-    // The terminal reseats a docked pane inline when it narrows below DOCK_COLUMNS. Placement is
-    // per surface, so a phone seating its copy inline must not close the terminal's dock.
-    if (e.props.placement === 'inline') {
+    // The fullscreen terminal reseats a docked pane inline when it narrows below DOCK_COLUMNS.
+    // Placement is per surface, so a phone seating its copy inline must not close the terminal's
+    // dock. The classic renderer has only the inline seat, so there the pane draws, kept short.
+    const classic = e.surface === 'terminal' && (e.viewport?.isFullscreen ?? terminalLayout?.isFullscreen) === false
+    const inline = e.props.placement === 'inline'
+    if (inline && !classic) {
       if (e.surface === 'terminal') void closePane($)
       return <Text color="inactive">The PR pane docks on the right only.</Text>
     }
@@ -468,7 +482,8 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const room = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
+    const tall = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
+    const room = inline ? Math.min(tall, INLINE_ROWS) : tall
     const layout = plan(live, settled, room)
     const count = (want: Health) => list.filter(p => health(p) === want).length
     const newest = Math.max(...list.map(p => p.checkedAt))

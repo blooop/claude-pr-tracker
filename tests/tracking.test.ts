@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { cardRows, docks, MIN_CARDS, plan, refsInCommand, summarise } from '../hooks/register.tsx'
+import { cardRows, docks, MIN_CARDS, opens, plan, refsInCommand, summarise } from '../hooks/register.tsx'
 import type { TrackedPr } from '../types'
 
 const ROLLUP = {
@@ -184,6 +184,28 @@ test('an attached terminal decides where the pane docks; without one, a desktop 
   for (const [isFullscreen, columns, surfaces, want] of cases) {
     expect(docks({ isFullscreen, columns }, surfaces)).toBe(want)
   }
+})
+
+test('the classic renderer opens the pane inline; a narrow fullscreen terminal or an unknown layout does not', () => {
+  expect(opens({ isFullscreen: false, columns: 80 }, ['terminal'])).toBe(true)
+  expect(opens({ isFullscreen: false, columns: 80 }, ['terminal', 'mobile'])).toBe(true)
+  expect(opens({ isFullscreen: true, columns: 109 }, ['terminal'])).toBe(false)
+  expect(opens({ isFullscreen: true, columns: 110 }, ['terminal'])).toBe(true)
+  expect(opens(undefined, ['terminal'])).toBe(false)
+  expect(opens(undefined, ['desktop'])).toBe(true)
+})
+
+test('under the classic renderer the inline pane draws the PR and stays open', async ($, on) => {
+  const open = panes(on)
+  await trackOne($, on)
+  open.add('pr-tracker')
+  const ui = await $.ui.mount({
+    plugin: 'pr-tracker', surface: 'terminal', component: 'Pane', requestId: 'pr-tracker',
+    props: { title: 'Pull requests', isFocused: false, placement: 'inline', bodyColumns: 100 } as never,
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+  })
+  expect(await ui.find({ text: /#12371/ })).toBeDefined()
+  expect(open.has('pr-tracker')).toBe(true)
 })
 
 test('the pane opens once when it can dock, and clicking the PR summary closes and reopens it', async ($, on) => {
