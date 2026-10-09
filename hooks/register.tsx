@@ -7,6 +7,8 @@ const PANE = 'pr-tracker'
 const POLL_MS = 60_000
 /** The terminal width from which the fullscreen layout docks a pane beside the transcript. */
 const DOCK_COLUMNS = 110
+/** Below this many body columns the pane drops its cards and header for one line per PR. */
+const MINIMAL_COLUMNS = 48
 const FIELDS = 'number,title,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup'
 
 const prs = atom({ plugin: 'pr-tracker', key: 'prs' } as const, [] as TrackedPr[])
@@ -424,6 +426,37 @@ export const register: Register = on => {
     const sorted = [...list].sort((x, y) => ORDER.indexOf(health(x)) - ORDER.indexOf(health(y)))
     const live = sorted.filter(p => p.state !== 'MERGED' && p.state !== 'CLOSED')
     const settled = sorted.filter(p => p.state === 'MERGED' || p.state === 'CLOSED')
+    if (e.props.bodyColumns < MINIMAL_COLUMNS) {
+      const width = e.props.bodyColumns
+      return (
+        <Box flexDirection="column">
+          <Box justifyContent="space-between">
+            <Text bold color="claude">⌥ PRs</Text>
+            <Button key="close" plain dimColor hotkey="x" role="dismiss" onPress={() => void closePane($)}>✕</Button>
+          </Box>
+          {live.map(p => {
+            const kind = health(p)
+            const ci = p.pass + p.fail + p.pending + p.skipped
+            const tally = ci > 0 ? ` ${p.pass + p.fail + p.skipped}/${ci}` : ''
+            const room = width - String(p.number).length - tally.length - 7
+            return (
+              <Box justifyContent="space-between">
+                <Text>
+                  <Text color={ACCENT[kind]} bold>{GLYPH[kind]} </Text>
+                  <Link href={p.url}><Text bold color="suggestion">#{p.number}</Text></Link>
+                  {room >= 6 ? <Text> {cut(p.title || p.repo, room)}</Text> : null}
+                  <Text color="inactive">{tally}</Text>
+                </Text>
+                {untrackButton(p)}
+              </Box>
+            )
+          })}
+          {settled.length > 0 ? (
+            <Text color="inactive">{cut(`done ${settled.map(p => `${GLYPH[health(p)]}#${p.number}`).join(' ')}`, width)}</Text>
+          ) : null}
+        </Box>
+      )
+    }
     const room = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
     const layout = plan(live, settled, room)
     const count = (want: Health) => list.filter(p => health(p) === want).length

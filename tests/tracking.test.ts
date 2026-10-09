@@ -220,3 +220,18 @@ test('the pane untracks a PR and closes itself from its own buttons', async ($, 
   await ui.press({ key: 'close' })
   expect(open.has('pr-tracker')).toBe(false)
 })
+
+test('a narrow dock shows each PR on one line and keeps the close button', async ($, on) => {
+  panes(on)
+  await trackOne($, on)
+  for (const [bodyColumns, cards] of [[60, 1], [40, 0]] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'pr-tracker', surface: 'terminal', component: 'Pane', requestId: 'pr-tracker',
+      props: { title: 'Pull requests', isFocused: false, placement: 'dock', bodyColumns } as never,
+    })
+    expect(await ui.findAll({ key: 'refresh:kinisi-robotics/kinisi_ros#12371' })).toHaveLength(cards)
+    expect((await ui.find({ text: /#12371/ }))?.text).toContain('2/3')
+    expect(await ui.find({ key: 'close' })).toBeDefined()
+    await ui.unmount()
+  }
+})
