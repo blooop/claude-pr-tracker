@@ -1,0 +1,13 @@
+{
+  "name": "claude-pr-tracker",
+  "description": "A live Claude Code pane tracking a session's GitHub PRs and their CI",
+  "owner": {
+    "name": "Joshua Smith"
+  },
+  "plugins": [
+    {
+      "name": "pr-tracker",
+      "source": "./"
+    }
+  ]
+}
