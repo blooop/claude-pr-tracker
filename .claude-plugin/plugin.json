@@ -6,5 +6,6 @@
   "author": {
     "name": "Joshua Smith"
   },
-  "repository": "https://github.com/JSmithRobotics/claude-pr-tracker"
+  "repository": "https://github.com/JSmithRobotics/claude-pr-tracker",
+  "license": "MIT"
 }
