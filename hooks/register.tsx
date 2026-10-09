@@ -70,6 +70,8 @@ let refreshing = false
 let summaryInHint = false
 /** The terminal's layout as last seen, for presses that come with no `presentation`. */
 let terminalLayout: CommandPresentation | undefined
+/** Whether the session has opened the pane on its own yet; it does so once, so a closed pane stays shut. */
+let autoOpened = false
 
 async function gh($: Engine, argv: string[]) {
   return $.process.run(['gh', ...argv], { timeoutMs: 30_000 })
@@ -289,6 +291,13 @@ async function openPane($: Engine, at: CommandPresentation | undefined): Promise
   return refused
 }
 
+/** Opens the pane the first time it would dock in the session. */
+async function openByDefault($: Engine) {
+  if (autoOpened || (await dockRefusal($, terminalLayout))) return
+  autoOpened = true
+  await $.ui.open({ id: PANE, title: 'Pull requests' })
+}
+
 function closePane($: Engine) {
   return $.ui.close({ id: PANE }).catch(() => undefined)
 }
@@ -305,6 +314,7 @@ export const register: Register = on => {
     })
     $.clock.every(POLL_MS, () => void refresh($))
     void showStatus($)
+    void openByDefault($).catch(() => undefined)
     return next(e)
   })
 
@@ -360,6 +370,7 @@ export const register: Register = on => {
     const clickable = e.surface !== 'terminal' || e.viewport?.isFullscreen === true
     if (e.surface === 'terminal' && e.viewport?.isFullscreen !== undefined) {
       terminalLayout = { isFullscreen: e.viewport.isFullscreen, columns: e.viewport.columns }
+      void openByDefault($).catch(() => undefined)
     }
     const text = summary(await read($, prs), (e.viewport?.columns ?? 0) < 120)
     if (e.surface === 'terminal' && clickable !== summaryInHint) {

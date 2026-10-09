@@ -186,7 +186,7 @@ test('an attached terminal decides where the pane docks; without one, a desktop 
   }
 })
 
-test('clicking the PR summary under the prompt opens the pane and clicking it again closes it', async ($, on) => {
+test('the pane opens once when it can dock, and clicking the PR summary closes and reopens it', async ($, on) => {
   const open = panes(on)
   on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: ['? for shortcuts'] }) as never)
   const statuses: (string | undefined)[] = []
@@ -199,10 +199,17 @@ test('clicking the PR summary under the prompt opens the pane and clicking it ag
   expect((await ui.find({ key: 'prs-toggle' }))?.text).toContain('1 open')
   expect((await ui.find({ text: /for shortcuts/ }))?.text).toBeDefined()
   expect(statuses.at(-1)).toBeUndefined()
-  await ui.press({ key: 'prs-toggle' })
   expect(open.has('pr-tracker')).toBe(true)
   await ui.press({ key: 'prs-toggle' })
   expect(open.has('pr-tracker')).toBe(false)
+  await $.ui.mount({
+    plugin: 'pr-tracker', surface: 'terminal', component: 'PromptHint',
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+    viewport: { columns: 140, rows: 40, isFullscreen: true },
+  })
+  expect(open.has('pr-tracker')).toBe(false)
+  await ui.press({ key: 'prs-toggle' })
+  expect(open.has('pr-tracker')).toBe(true)
 })
 
 test('the pane untracks a PR and closes itself from its own buttons', async ($, on) => {
